@@ -1,6 +1,6 @@
 import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
-import { getRuns } from "@/lib/db"
+import { getRuns } from "@/lib/store"
 import { Separator } from "@/components/ui/separator"
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
