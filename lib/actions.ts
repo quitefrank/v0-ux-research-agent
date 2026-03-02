@@ -8,7 +8,7 @@ import {
   getSources,
   addRun,
   upsertIndexedPages,
-} from "./db"
+} from "./store"
 import type { RunResult, IndexResult } from "./types"
 import { redirect } from "next/navigation"
 import { revalidatePath } from "next/cache"
