@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation"
-import { getRun } from "@/lib/db"
+import { getRun } from "@/lib/store"
 import { RunResultTabs } from "@/components/run-result-tabs"
 import { Badge } from "@/components/ui/badge"
 import { ArrowLeft } from "lucide-react"
