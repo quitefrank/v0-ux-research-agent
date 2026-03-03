@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation"
-import { getRun } from "@/lib/store"
+import { getRun } from "@/lib/actions"
 import { RunResultTabs } from "@/components/run-result-tabs"
 import { Badge } from "@/components/ui/badge"
 import { ArrowLeft } from "lucide-react"
@@ -7,7 +7,7 @@ import Link from "next/link"
 
 export default async function RunPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const run = getRun(id)
+  const run = await getRunDb(params.id)
 
   if (!run || !run.result) {
     notFound()
