@@ -1,16 +1,15 @@
-import { notFound } from "next/navigation"
-import { getRun } from "@/lib/actions"
-import { RunResultTabs } from "@/components/run-result-tabs"
-import { Badge } from "@/components/ui/badge"
-import { ArrowLeft } from "lucide-react"
-import Link from "next/link"
+import { notFound } from "next/navigation";
+import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { RunResultTabs } from "@/components/run-result-tabs";
+import { getRunDb } from "@/lib/actions";
 
-export default async function RunPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params
-  const run = await getRunDb(params.id)
+export default async function RunPage({ params }: { params: { id: string } }) {
+  const run = await getRunDb(params.id);
 
   if (!run || !run.result) {
-    notFound()
+    notFound();
   }
 
   return (
@@ -28,16 +27,12 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
           <h1 className="text-xl font-semibold text-foreground leading-snug text-balance">
             {run.query}
           </h1>
+
           <div className="flex flex-wrap items-center gap-2">
-            {run.platform && (
-              <Badge variant="secondary">{run.platform}</Badge>
-            )}
-            {run.pattern_type && (
-              <Badge variant="secondary">{run.pattern_type}</Badge>
-            )}
-            {run.product_category && (
-              <Badge variant="secondary">{run.product_category}</Badge>
-            )}
+            {run.platform && <Badge variant="secondary">{run.platform}</Badge>}
+            {run.pattern_type && <Badge variant="secondary">{run.pattern_type}</Badge>}
+            {run.product_category && <Badge variant="secondary">{run.product_category}</Badge>}
+
             <span className="text-xs text-muted-foreground">
               {new Date(run.created_at).toLocaleDateString("en-US", {
                 month: "short",
@@ -53,5 +48,5 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
 
       <RunResultTabs result={run.result} />
     </div>
-  )
+  );
 }
