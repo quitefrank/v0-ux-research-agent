@@ -1,6 +1,6 @@
 "use server";
 
-import { sql } from "@/lib/store";
+import { sql } from "@/lib/db";
 
 export async function initDb() {
   await sql`
