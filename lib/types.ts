@@ -1,5 +1,5 @@
 export interface Source {
-  id: string
+  id: number
   name: string
   base_url: string
   enabled: boolean
@@ -12,7 +12,7 @@ export interface Source {
 }
 
 export interface IndexedPage {
-  id: string
+  id: number
   source_id: string
   url: string
   title?: string
@@ -51,7 +51,7 @@ export interface RunResult {
 }
 
 export interface Run {
-  id: string
+  id: number
   query: string
   platform?: string
   pattern_type?: string
