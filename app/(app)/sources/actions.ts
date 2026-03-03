@@ -1,6 +1,7 @@
 "use server";
 
 import { sql } from "@/lib/db";
+import { redirect } from "next/navigation";
 
 export async function initDb() {
   await sql`
@@ -45,5 +46,5 @@ export async function initDb() {
     );
   `;
 
-  return { ok: true };
+  redirect("/sources?db=initialized");
 }
