@@ -1,24 +1,43 @@
 "use server";
 
-import { sql } from "@/lib/db";
-import type { IndexResult, Run, Source } from "@/lib/types";
-import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { sql } from "@/lib/db";
 
 /**
- * Path A (DB-backed) server actions.
- *
- * Tables expected (created by initDb somewhere):
- * - sources
- * - pages
- * - runs
- *
  * Notes:
- * - UI types use string IDs, but DB uses SERIAL ints.
- *   We cast id::text when returning to the UI.
+ * - This file is the server-actions façade that the client components import.
+ * - It is DB-backed (Path A). If DATABASE_URL is misconfigured, these will fail at runtime.
  */
 
-/** Optional helper: run this once to create all tables. */
+function toInt(value: unknown, fallback: number) {
+  const n = typeof value === "string" ? Number.parseInt(value, 10) : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toBool(value: unknown, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return fallback;
+  return value === "true" || value === "1" || value === "on";
+}
+
+function safeText(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s.length ? s : null;
+}
+
+function stripHtmlToText(html: string) {
+  // very simple extraction for MVP
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<\/p>|<\/div>|<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** ============== DB INIT ============== */
 export async function initDb() {
   await sql`
     CREATE TABLE IF NOT EXISTS sources (
@@ -62,14 +81,13 @@ export async function initDb() {
     );
   `;
 
-  return { ok: true as const };
+  return { ok: true };
 }
 
-/* ----------------------------- SOURCES (DB) ----------------------------- */
-
-export async function getSourcesDb(): Promise<Source[]> {
+/** ============== SOURCES ============== */
+export async function getSourcesDb() {
   const rows = await sql<{
-    id: string;
+    id: number;
     name: string;
     base_url: string;
     enabled: boolean;
@@ -79,48 +97,41 @@ export async function getSourcesDb(): Promise<Source[]> {
     tags: string | null;
     notes: string | null;
     last_indexed_at: string | null;
-  }>`
+  }[]>`
     SELECT
-      id::text AS id,
-      name,
-      base_url,
-      enabled,
-      crawl_depth,
-      include_patterns,
-      exclude_patterns,
-      tags,
-      notes,
-      last_indexed_at::text AS last_indexed_at
+      id, name, base_url, enabled, crawl_depth,
+      include_patterns, exclude_patterns, tags, notes, last_indexed_at
     FROM sources
     ORDER BY id DESC;
   `;
 
+  // map to what your UI expects (string ids)
   return rows.map((r) => ({
-    id: r.id,
+    id: String(r.id),
     name: r.name,
     base_url: r.base_url,
     enabled: r.enabled,
     crawl_depth: r.crawl_depth,
-    include_patterns: r.include_patterns ?? undefined,
-    exclude_patterns: r.exclude_patterns ?? undefined,
-    tags: r.tags ?? undefined,
-    notes: r.notes ?? undefined,
-    last_indexed_at: r.last_indexed_at ?? undefined,
+    include_patterns: r.include_patterns ?? "",
+    exclude_patterns: r.exclude_patterns ?? "",
+    tags: r.tags ?? "",
+    notes: r.notes ?? "",
+    last_indexed_at: r.last_indexed_at ? new Date(r.last_indexed_at).toISOString() : null,
   }));
 }
 
-export async function createSourceDb(input: Omit<Source, "id">): Promise<Source> {
-  const rows = await sql<{ id: string }>`
-    INSERT INTO sources (
-      name,
-      base_url,
-      enabled,
-      crawl_depth,
-      include_patterns,
-      exclude_patterns,
-      tags,
-      notes
-    )
+export async function createSourceDb(input: {
+  name: string;
+  base_url: string;
+  enabled: boolean;
+  crawl_depth: number;
+  include_patterns?: string;
+  exclude_patterns?: string;
+  tags?: string;
+  notes?: string;
+}) {
+  const rows = await sql<{ id: number }[]>`
+    INSERT INTO sources (name, base_url, enabled, crawl_depth, include_patterns, exclude_patterns, tags, notes)
     VALUES (
       ${input.name},
       ${input.base_url},
@@ -131,247 +142,278 @@ export async function createSourceDb(input: Omit<Source, "id">): Promise<Source>
       ${input.tags ?? null},
       ${input.notes ?? null}
     )
-    RETURNING id::text AS id;
+    RETURNING id;
   `;
-
-  return { ...input, id: rows[0]!.id };
+  return { id: String(rows[0]!.id) };
 }
 
-export async function updateSourceDb(input: Source): Promise<Source> {
+export async function updateSourceDb(
+  id: string,
+  input: Partial<{
+    name: string;
+    base_url: string;
+    enabled: boolean;
+    crawl_depth: number;
+    include_patterns: string;
+    exclude_patterns: string;
+    tags: string;
+    notes: string;
+  }>
+) {
+  const sourceId = toInt(id, -1);
+  if (sourceId <= 0) throw new Error("Invalid source id");
+
+  // Build a safe "patch" using COALESCE-style updates.
   await sql`
     UPDATE sources
     SET
-      name = ${input.name},
-      base_url = ${input.base_url},
-      enabled = ${input.enabled},
-      crawl_depth = ${input.crawl_depth},
-      include_patterns = ${input.include_patterns ?? null},
-      exclude_patterns = ${input.exclude_patterns ?? null},
-      tags = ${input.tags ?? null},
-      notes = ${input.notes ?? null}
-    WHERE id = ${Number(input.id)};
+      name = COALESCE(${input.name ?? null}, name),
+      base_url = COALESCE(${input.base_url ?? null}, base_url),
+      enabled = COALESCE(${typeof input.enabled === "boolean" ? input.enabled : null}, enabled),
+      crawl_depth = COALESCE(${typeof input.crawl_depth === "number" ? input.crawl_depth : null}, crawl_depth),
+      include_patterns = COALESCE(${input.include_patterns ?? null}, include_patterns),
+      exclude_patterns = COALESCE(${input.exclude_patterns ?? null}, exclude_patterns),
+      tags = COALESCE(${input.tags ?? null}, tags),
+      notes = COALESCE(${input.notes ?? null}, notes)
+    WHERE id = ${sourceId};
   `;
-  return input;
-}
 
-export async function deleteSourceDb(id: string): Promise<{ ok: true }> {
-  await sql`DELETE FROM sources WHERE id = ${Number(id)};`;
   return { ok: true };
 }
 
-export async function toggleSourceDb(id: string, enabled: boolean): Promise<{ ok: true }> {
-  await sql`
-    UPDATE sources
-    SET enabled = ${enabled}
-    WHERE id = ${Number(id)};
-  `;
+export async function deleteSourceDb(id: string) {
+  const sourceId = toInt(id, -1);
+  if (sourceId <= 0) throw new Error("Invalid source id");
+  await sql`DELETE FROM sources WHERE id = ${sourceId};`;
   return { ok: true };
 }
 
-/* -------------------------- SOURCE ACTION WRAPPERS -------------------------- */
-/** These are what your client components import and call. */
+export async function toggleSourceDb(id: string, enabled: boolean) {
+  const sourceId = toInt(id, -1);
+  if (sourceId <= 0) throw new Error("Invalid source id");
+  await sql`UPDATE sources SET enabled = ${enabled} WHERE id = ${sourceId};`;
+  return { ok: true };
+}
 
-export async function addSourceAction(_prevState: any, formData: FormData) {
-  const source: Omit<Source, "id"> = {
-    name: String(formData.get("name") ?? "").trim(),
-    base_url: String(formData.get("base_url") ?? "").trim(),
-    enabled: String(formData.get("enabled") ?? "true") === "true",
-    crawl_depth: Number(formData.get("crawl_depth") ?? 1),
-    include_patterns: (String(formData.get("include_patterns") ?? "").trim() || undefined) as any,
-    exclude_patterns: (String(formData.get("exclude_patterns") ?? "").trim() || undefined) as any,
-    tags: (String(formData.get("tags") ?? "").trim() || undefined) as any,
-    notes: (String(formData.get("notes") ?? "").trim() || undefined) as any,
-    last_indexed_at: undefined,
-  };
+/** Server-actions consumed by client components */
+export async function addSourceAction(formData: FormData) {
+  const name = String(formData.get("name") ?? "").trim();
+  const baseUrl = String(formData.get("base_url") ?? "").trim();
 
-  if (!source.name || !source.base_url) {
-    return { ok: false as const, error: "Name and Base URL are required." };
-  }
+  if (!name) return { ok: false, error: "Name is required" };
+  if (!baseUrl) return { ok: false, error: "Base URL is required" };
 
-  await createSourceDb(source);
+  const enabled = toBool(formData.get("enabled"), true);
+  const crawlDepth = toInt(formData.get("crawl_depth"), 1);
+
+  const includePatterns = String(formData.get("include_patterns") ?? "");
+  const excludePatterns = String(formData.get("exclude_patterns") ?? "");
+  const tags = String(formData.get("tags") ?? "");
+  const notes = String(formData.get("notes") ?? "");
+
+  await createSourceDb({
+    name,
+    base_url: baseUrl,
+    enabled,
+    crawl_depth: crawlDepth,
+    include_patterns: includePatterns,
+    exclude_patterns: excludePatterns,
+    tags,
+    notes,
+  });
+
   revalidatePath("/sources");
-  return { ok: true as const };
+  return { ok: true };
 }
 
-export async function updateSourceAction(_prevState: any, formData: FormData) {
+export async function updateSourceAction(formData: FormData) {
   const id = String(formData.get("id") ?? "").trim();
+  if (!id) return { ok: false, error: "Missing source id" };
 
-  const source: Source = {
-    id,
-    name: String(formData.get("name") ?? "").trim(),
-    base_url: String(formData.get("base_url") ?? "").trim(),
-    enabled: String(formData.get("enabled") ?? "true") === "true",
-    crawl_depth: Number(formData.get("crawl_depth") ?? 1),
-    include_patterns: (String(formData.get("include_patterns") ?? "").trim() || undefined) as any,
-    exclude_patterns: (String(formData.get("exclude_patterns") ?? "").trim() || undefined) as any,
-    tags: (String(formData.get("tags") ?? "").trim() || undefined) as any,
-    notes: (String(formData.get("notes") ?? "").trim() || undefined) as any,
-    last_indexed_at: undefined,
+  const patch = {
+    name: safeText(formData.get("name")) ?? undefined,
+    base_url: safeText(formData.get("base_url")) ?? undefined,
+    enabled: typeof formData.get("enabled") === "string" ? toBool(formData.get("enabled"), true) : undefined,
+    crawl_depth: typeof formData.get("crawl_depth") === "string" ? toInt(formData.get("crawl_depth"), 1) : undefined,
+    include_patterns: safeText(formData.get("include_patterns")) ?? undefined,
+    exclude_patterns: safeText(formData.get("exclude_patterns")) ?? undefined,
+    tags: safeText(formData.get("tags")) ?? undefined,
+    notes: safeText(formData.get("notes")) ?? undefined,
   };
 
-  if (!source.id || !source.name || !source.base_url) {
-    return { ok: false as const, error: "Missing required fields." };
-  }
-
-  await updateSourceDb(source);
+  await updateSourceDb(id, patch);
   revalidatePath("/sources");
-  return { ok: true as const };
+  return { ok: true };
 }
 
-export async function deleteSourceAction(id: string) {
+export async function deleteSourceAction(formData: FormData) {
+  const id = String(formData.get("id") ?? "").trim();
+  if (!id) return { ok: false, error: "Missing source id" };
+
   await deleteSourceDb(id);
   revalidatePath("/sources");
-  return { ok: true as const };
+  return { ok: true };
 }
 
-export async function toggleSourceAction(id: string, enabled: boolean) {
+export async function toggleSourceAction(formData: FormData) {
+  const id = String(formData.get("id") ?? "").trim();
+  const enabled = toBool(formData.get("enabled"), false);
+
+  if (!id) return { ok: false, error: "Missing source id" };
+
   await toggleSourceDb(id, enabled);
   revalidatePath("/sources");
-  return { ok: true as const };
+  return { ok: true };
 }
 
-/* ----------------------------- INDEXING (DB) ----------------------------- */
+/** ============== INDEXING (MVP) ============== */
+export async function indexSources(): Promise<{ ok: boolean; results: Array<{ sourceId: string; pagesIndexed: number; errors: string[] }> }> {
+  const sources = await getSourcesDb();
+  const enabledSources = sources.filter((s) => s.enabled);
 
-export async function indexSources(sources: Source[]): Promise<IndexResult[]> {
-  // Minimal “Path A” behavior: mark sources as indexed.
-  // Crawling + extraction can be added later.
-  const now = new Date().toISOString();
+  const results: Array<{ sourceId: string; pagesIndexed: number; errors: string[] }> = [];
 
-  const results: IndexResult[] = [];
+  for (const source of enabledSources) {
+    const errors: string[] = [];
+    let pagesIndexed = 0;
 
-  for (const s of sources) {
-    if (!s.enabled) {
-      results.push({
-        sourceId: s.id,
-        pagesIndexed: 0,
-        errors: ["Source disabled"],
-      });
-      continue;
+    try {
+      // MVP: fetch just the base_url and store one "page" record
+      const res = await fetch(source.base_url, { redirect: "follow" });
+      if (!res.ok) {
+        errors.push(`Fetch failed (${res.status}) for ${source.base_url}`);
+      } else {
+        const html = await res.text();
+        const text = stripHtmlToText(html);
+        const snippet = text.slice(0, 240);
+
+        const sourceId = toInt(source.id, -1);
+        if (sourceId > 0) {
+          await sql`
+            INSERT INTO pages (source_id, url, title, snippet, extracted_text, status, last_crawled_at)
+            VALUES (${sourceId}, ${source.base_url}, ${source.name}, ${snippet}, ${text}, 'ok', now())
+            ON CONFLICT (source_id, url)
+            DO UPDATE SET
+              title = EXCLUDED.title,
+              snippet = EXCLUDED.snippet,
+              extracted_text = EXCLUDED.extracted_text,
+              status = 'ok',
+              last_crawled_at = now();
+          `;
+
+          await sql`UPDATE sources SET last_indexed_at = now() WHERE id = ${sourceId};`;
+          pagesIndexed = 1;
+        } else {
+          errors.push("Invalid source id");
+        }
+      }
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e));
     }
 
-    await sql`
-      UPDATE sources
-      SET last_indexed_at = now()
-      WHERE id = ${Number(s.id)};
-    `;
-
-    results.push({
-      sourceId: s.id,
-      pagesIndexed: 0,
-      errors: [],
-    });
+    results.push({ sourceId: source.id, pagesIndexed, errors });
   }
 
   revalidatePath("/sources");
-  return results;
+  return { ok: true, results };
 }
 
-/* ----------------------------- RUNS (DB) ----------------------------- */
+/** ============== RESEARCH ============== */
+export async function runResearch(
+  _prevState: any,
+  formData: FormData
+): Promise<
+  | { ok: true; runId: string; result: any }
+  | { ok: false; error: string }
+> {
+  const query = String(formData.get("query") ?? "").trim();
+  if (!query) return { ok: false, error: "Query is required" };
 
-export async function getRunsDb(limit = 20): Promise<Run[]> {
+  // Optional metadata fields from the UI (these are in your types and UI)
+  const platform = safeText(formData.get("platform")) ?? null;
+  const patternType = safeText(formData.get("pattern_type")) ?? null;
+  const category = safeText(formData.get("category")) ?? null;
+
+  // MVP “search”: pull top matching pages from pages.extracted_text/snippet/url
   const rows = await sql<{
-    id: string;
-    created_at: string;
-    query: string;
-    platform: string | null;
-    pattern_type: string | null;
-    category: string | null;
-    result_json: any;
-  }>`
-    SELECT
-      id::text AS id,
-      created_at::text AS created_at,
-      query,
-      platform,
-      pattern_type,
-      category,
-      result_json
-    FROM runs
-    ORDER BY created_at DESC
-    LIMIT ${limit};
+    url: string;
+    title: string | null;
+    snippet: string | null;
+    extracted_text: string | null;
+  }[]>`
+    SELECT url, title, snippet, extracted_text
+    FROM pages
+    WHERE extracted_text ILIKE ${"%" + query + "%"}
+       OR snippet ILIKE ${"%" + query + "%"}
+       OR url ILIKE ${"%" + query + "%"}
+    ORDER BY id DESC
+    LIMIT 10;
   `;
 
-  return rows.map((r) => ({
-    id: r.id,
-    created_at: r.created_at,
-    query: r.query,
-    platform: r.platform ?? undefined,
-    pattern_type: r.pattern_type ?? undefined,
-    product_category: r.category ?? undefined,
-    result: r.result_json,
+  const sources = rows.map((r) => ({
+    title: r.title ?? r.url,
+    url: r.url,
+    snippet: r.snippet ?? (r.extracted_text ? r.extracted_text.slice(0, 240) : ""),
   }));
+
+  // This result shape just needs to satisfy your UI renderer (RunResultTabs).
+  // Keep it simple for MVP.
+  const result = {
+    answer: sources.length
+      ? `Found ${sources.length} relevant page(s) in your indexed sources for: "${query}".`
+      : `No indexed pages matched "${query}". Try indexing sources first, or broaden the query.`,
+    insights: sources.length
+      ? [
+          "This is an MVP search over indexed text stored in the database.",
+          "Improve indexing to crawl deeper pages and store better extracted_text.",
+        ]
+      : [
+          "Indexing likely has not been run yet, or the sources contain no matching text.",
+          "Add sources, click Index Sources, then re-run the query.",
+        ],
+    sources,
+  };
+
+  const inserted = await sql<{ id: number }[]>`
+    INSERT INTO runs (query, platform, pattern_type, category, result_json)
+    VALUES (${query}, ${platform}, ${patternType}, ${category}, ${JSON.stringify(result)}::jsonb)
+    RETURNING id;
+  `;
+
+  const runId = String(inserted[0]!.id);
+  return { ok: true, runId, result };
 }
 
-export async function getRunDb(id: string): Promise<Run | null> {
+/** Used by /run/[id] page */
+export async function getRunDb(id: string) {
+  const runId = toInt(id, -1);
+  if (runId <= 0) return null;
+
   const rows = await sql<{
-    id: string;
+    id: number;
     created_at: string;
     query: string;
     platform: string | null;
     pattern_type: string | null;
     category: string | null;
     result_json: any;
-  }>`
-    SELECT
-      id::text AS id,
-      created_at::text AS created_at,
-      query,
-      platform,
-      pattern_type,
-      category,
-      result_json
+  }[]>`
+    SELECT id, created_at, query, platform, pattern_type, category, result_json
     FROM runs
-    WHERE id = ${Number(id)}
+    WHERE id = ${runId}
     LIMIT 1;
   `;
 
-  if (rows.length === 0) return null;
+  const r = rows[0];
+  if (!r) return null;
 
-  const r = rows[0]!;
   return {
-    id: r.id,
-    created_at: r.created_at,
+    id: String(r.id),
+    created_at: new Date(r.created_at).toISOString(),
     query: r.query,
     platform: r.platform ?? undefined,
     pattern_type: r.pattern_type ?? undefined,
-    product_category: r.category ?? undefined,
+    product_category: r.category ?? undefined, // your UI uses product_category label
     result: r.result_json,
   };
-}
-
-/**
- * Server Action called by <ResearchForm />.
- * Inserts a run row, then redirects to /run/:id.
- */
-export async function runResearch(_prevState: any, formData: FormData) {
-  const query = String(formData.get("query") ?? "").trim();
-  const platform = String(formData.get("platform") ?? "").trim() || null;
-  const pattern_type = String(formData.get("pattern_type") ?? "").trim() || null;
-  const category = String(formData.get("product_category") ?? "").trim() || null;
-
-  if (!query) {
-    return { ok: false as const, error: "Please enter a research query." };
-  }
-
-  // Placeholder result until you wire an AI provider + crawling.
-  const result_json = {
-    status: "stub",
-    summary: "Research execution is not yet connected to a crawler or AI provider.",
-    query,
-    platform,
-    pattern_type,
-    category,
-    created_at: new Date().toISOString(),
-  };
-
-  const rows = await sql<{ id: string }>`
-    INSERT INTO runs (query, platform, pattern_type, category, result_json)
-    VALUES (${query}, ${platform}, ${pattern_type}, ${category}, ${result_json}::jsonb)
-    RETURNING id::text AS id;
-  `;
-
-  const id = rows[0]!.id;
-
-  revalidatePath("/");
-  redirect(`/run/${id}`);
 }
